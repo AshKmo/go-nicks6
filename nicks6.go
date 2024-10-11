@@ -3,11 +3,9 @@ package nicks6
 import (
 	"strings"
 	"strconv"
-	"fmt"
 )
 
-type Unit interface {
-}
+type Unit interface{}
 
 type Null struct{}
 
@@ -26,11 +24,35 @@ type Symbol string
 
 type String string
 
+type Protolist []Unit
+
 type List []Unit
 
-type Dictionary map[string]Unit
+type Association struct {
+	Key Unit
+	Value Unit
+}
+
+type Protodict []Association
+
+type Dict map[string]Unit
+
+type Expression struct {
+	Result Unit
+}
+
+type Protofunction struct {
+	Variable Symbol
+	Result Unit
+}
 
 type Function func(Unit) Unit
+
+type Operation struct {
+	Name Operator
+	A Unit
+	B Unit
+}
 
 func gcd(a uint, b uint) uint {
 	if b == 0 {
@@ -65,6 +87,20 @@ func sign(x int) int {
 	return 1
 }
 
+func merge(a Dict, b Dict) Dict {
+	newDict := Dict{}
+
+	for k, v := range a {
+		newDict[k] = v
+	}
+
+	for k, v := range b {
+		newDict[k] = v
+	}
+
+	return newDict
+}
+
 func mul(a Fraction, b Fraction) Fraction {
 	sign := sign(a.Numerator) * sign(b.Numerator)
 	an, ad := simplify(abs(a.Numerator), b.Denominator)
@@ -73,10 +109,20 @@ func mul(a Fraction, b Fraction) Fraction {
 	return Fraction{int(an) * int(bn) * sign, ad * bd}
 }
 
+func add(a Fraction, b Fraction) Fraction {
+	n := a.Numerator * int(b.Denominator) + b.Numerator * int(a.Denominator)
+	d := a.Denominator * b.Denominator
+	s := sign(n)
+
+	nn, nd := simplify(abs(n), d)
+
+	return Fraction{int(nn) * s, nd}
+}
+
 func Lex(script string) []Unit {
 	tokens := []Unit{}
 	var token strings.Builder
-	
+
 	isOperator := false
 
 	endToken := func() {
@@ -180,7 +226,7 @@ func Lex(script string) []Unit {
 			endToken()
 			tokens = append(tokens, Fraction{1, 0})
 
-		// number parser
+		// number cruncher
 		case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
 			endToken()
 
@@ -199,6 +245,7 @@ func Lex(script string) []Unit {
 					token.WriteByte(c)
 				case '_':
 				default:
+					i--
 					break L
 				}
 			}
@@ -248,24 +295,271 @@ func Lex(script string) []Unit {
 	return tokens
 }
 
-func Parse(tokens []Unit) Unit {
-	// TODO
-	return nil
+func parseList(tokens []Unit, i int) (Protolist, int) {
+	lastI := i
+
+	pl := Protolist{}
+
+	for {
+		var res Expression
+		res, i = Parse(tokens, i)
+
+		t := tokens[i]
+
+		_, tIsBracket := t.(Bracket)
+
+		if tIsBracket && i == lastI {
+			break
+		}
+
+		pl = append(pl, res)
+
+		if tIsBracket {
+			break
+		}
+
+		i++
+		lastI = i
+	}
+
+	return pl, i
 }
 
-func Evaluate(exp Unit) Unit {
-	// TODO
-	return nil
+func parseDict(tokens []Unit, i int) (Protodict, int) {
+	pd := Protodict{}
+
+	for {
+		var key Expression
+		key, i = Parse(tokens, i)
+
+		_, keyIsNull := key.Result.(Null)
+
+		t := tokens[i]
+
+		v, tIsSpecial := t.(Special)
+		_, tIsBracket := t.(Bracket)
+
+		if !keyIsNull {
+			var val Expression
+			if tIsSpecial && v == ',' || tIsBracket {
+				val = key
+			} else {
+				i++
+				val, i = Parse(tokens, i)
+			}
+
+			pd = append(pd, Association{key.Result, val.Result})
+		}
+
+		t = tokens[i]
+
+		_, tIsBracket = t.(Bracket)
+
+		if tIsBracket {
+			break
+		}
+
+		i++
+	}
+
+	return pd, i
 }
 
-func Interpret(s string) Unit {
-	return Evaluate(Parse(Lex(s)))
+func Parse(tokens []Unit, i int) (Expression, int) {
+	bracketed := []Unit{}
+
+	bracketLoop:
+	for ; i < len(tokens); i++ {
+		var toAdd Unit
+
+		switch v := tokens[i].(type) {
+		case Special:
+			if v == '\\' {
+				i++
+
+				var variable Symbol
+
+				switch v := tokens[i].(type) {
+				case Symbol:
+					variable = v
+				default:
+					variable = ""
+				}
+
+				var expression Expression
+				expression, i = Parse(tokens, i + 1)
+
+				bracketed = append(bracketed, Protofunction{variable, expression.Result})
+			}
+
+			break bracketLoop
+		case Bracket:
+			switch v {
+			case '(':
+				toAdd, i = Parse(tokens, i + 1)
+			case '[':
+				toAdd, i = parseList(tokens, i + 1)
+			case '{':
+				toAdd, i = parseDict(tokens, i + 1)
+			default:
+				break bracketLoop
+			}
+		default:
+			toAdd = v
+		}
+
+		bracketed = append(bracketed, toAdd)
+	}
+
+	for _, operators := range [][]Operator{
+		[]Operator{"."},
+		[]Operator{".>"},
+		[]Operator{"/<", "/>"},
+		[]Operator{"--"},
+		[]Operator{"++", "..", "//"},
+		[]Operator{"*", "/"},
+		[]Operator{"+", "-"},
+		[]Operator{"<<", ">>"},
+		[]Operator{"<=", ">=", "<", ">"},
+		[]Operator{"=", "~="},
+		[]Operator{"&", "|", "^"},
+	} {
+		for i := 1; i < len(bracketed); i++ {
+			t := bracketed[i]
+
+			switch v := t.(type) {
+			case Operator:
+				for _, operator := range operators {
+					if v == operator {
+						i--
+
+						a := bracketed[i]
+						b := bracketed[i + 2]
+
+						bracketed = append(bracketed[:i], bracketed[i + 2:]...)
+
+						bracketed[i] = Operation{v, a, b}
+
+						break
+					}
+				}
+			default:
+				_, isOperator := bracketed[i - 1].(Operator)
+				if isOperator {
+					break
+				}
+
+				i--
+
+				a := bracketed[i]
+				b := bracketed[i + 1]
+
+				bracketed = append(bracketed[:i], bracketed[i + 1:])
+
+				bracketed[i] = Operation{"", a, b}
+			}
+		}
+	}
+
+	if len(bracketed) == 0 {
+		return Expression{Null{}}, i
+	}
+
+	return Expression{bracketed[0]}, i
 }
 
-func Pretty(u Unit) string {
+func Evaluate(u Unit, s Dict) Unit {
 	switch v := u.(type) {
+	case Expression:
+		return Evaluate(v.Result, s)
+	case Symbol:
+		return s[string(v)]
+	case Operation:
+		switch v.Name {
+		case "":
+			return Evaluate(v.A, s).(Function)(Evaluate(v.B, s))
+		case "*":
+			return mul(Evaluate(v.A, s).(Fraction), Evaluate(v.B, s).(Fraction))
+		case "+":
+			return add(Evaluate(v.A, s).(Fraction), Evaluate(v.B, s).(Fraction))
+		case "-":
+			b := Evaluate(v.B, s).(Fraction)
+			return add(Evaluate(v.A, s).(Fraction), Fraction{-b.Numerator, b.Denominator})
+		case "/":
+			b := Evaluate(v.B, s).(Fraction)
+			sn := sign(b.Numerator)
+			return mul(Evaluate(v.A, s).(Fraction), Fraction{sn * int(b.Denominator), uint(b.Numerator * sn)})
+		}
+	case Protolist:
+		l := List{}
+		for _, e := range v {
+			l = append(l, Evaluate(e, s))
+		}
+		return l
+	case Protodict:
+		d := Dict{}
+		for _, e := range v {
+			key, nonStringKey := e.Key.(Symbol)
+
+			val := Evaluate(e.Value, s)
+
+			if nonStringKey {
+				d[string(key)] = val
+			} else {
+				d[string(Evaluate(e.Key, s).(String))] = val
+			}
+		}
+		return d
+	case Protofunction:
+		return Function(func(x Unit) Unit {
+			nCtx := Dict{}
+			for k, v := range s {
+				nCtx[k] = v
+			}
+			nCtx[string(v.Variable)] = x
+			return Evaluate(v.Result, nCtx)
+		})
+	}
+
+	return u
+}
+
+func Interpret(script string, scope Dict) Unit {
+	tokens := Lex(script)
+	parsed, _ := Parse(tokens, 0)
+	return Evaluate(parsed.Result, scope)
+}
+
+func prettyList(l []Unit, tabs int) string {
+	r := "["
+	for i, e := range l {
+		r += Pretty(e, tabs)
+
+		if i + 1 < len(l) {
+			r += ", "
+		}
+	}
+
+	return r + "]"
+}
+
+func genTabs(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return "\t" + genTabs(n - 1)
+}
+
+func Pretty(u Unit, tabs int) string {
+	switch v := u.(type) {
+	case Operation:
+		return Pretty(v.A, tabs) + " " + Pretty(v.Name, tabs) + " " + Pretty(v.B, tabs)
+	case Expression:
+		return "(" + Pretty(v.Result, tabs) + ")"
 	case Null:
 		return "_"
+	case Special:
+		return string(v)
 	case Symbol:
 		return string(v)
 	case Operator:
@@ -281,21 +575,42 @@ func Pretty(u Unit) string {
 		}
 		return "\"" + r + "\""
 	case Fraction:
-		if v.Denominator == 1 {
+		if v.Numerator >= 0 && v.Denominator == 1 {
 			return strconv.Itoa(v.Numerator)
 		}
-		return fmt.Sprintf("(%d / %d)", v.Numerator, v.Denominator)
+		r := "("
+		if v.Numerator < 0 {
+			r += "0"
+		}
+		r += strconv.Itoa(v.Numerator)
+		if v.Denominator != 1 {
+			r += " / " + strconv.FormatUint(uint64(v.Denominator), 10)
+		}
+		return r + ")"
+	case Protolist:
+		return prettyList(v, tabs)
 	case List:
-		r := "["
-		for i, e := range v {
-			r += Pretty(e)
+		return prettyList(v, tabs)
+	case Protodict:
+		r := "{\n"
 
-			if i + 1 < len(v) {
-				r += ", "
-			}
+		for _, a := range v {
+			r += genTabs(tabs + 1) + Pretty(a.Key, tabs + 1) + ": " + Pretty(a.Value, tabs + 1) + ",\n"
 		}
 
-		return r + "]"
+		return r + genTabs(tabs) + "}"
+	case Dict:
+		r := "{\n"
+
+		for k, v := range v {
+			r += genTabs(tabs + 1) + k + ": " + Pretty(v, tabs + 1) + ",\n"
+		}
+
+		return r + genTabs(tabs) + "}"
+	case Protofunction:
+		return "(\\" + string(v.Variable) + " " + Pretty(v.Result, tabs) + ")"
+	case Function:
+		return "(\\x # FUNCTION #)"
 	}
 
 	return "<UNKNOWN>"
