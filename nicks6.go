@@ -2,7 +2,9 @@ package nicks6
 
 import (
 	"strings"
-	"strconv"
+	"fmt"
+	"slices"
+	"reflect"
 )
 
 type Unit interface{}
@@ -87,6 +89,16 @@ func sign(x int) int {
 	return 1
 }
 
+func fsign(x Fraction) int {
+	if x.Numerator < 0 {
+		return -1
+	}
+	if x.Numerator == 0 {
+		return 0
+	}
+	return 1
+}
+
 func merge(a Dict, b Dict) Dict {
 	newDict := Dict{}
 
@@ -109,6 +121,14 @@ func mul(a Fraction, b Fraction) Fraction {
 	return Fraction{int(an) * int(bn) * sign, ad * bd}
 }
 
+func div(a Fraction, b Fraction) Fraction {
+	sign := sign(a.Numerator) * sign(b.Numerator)
+	an, ad := simplify(abs(a.Numerator), abs(b.Numerator))
+	bn, bd := simplify(b.Denominator, a.Denominator)
+
+	return Fraction{int(an) * int(bn) * sign, ad * bd}
+}
+
 func add(a Fraction, b Fraction) Fraction {
 	n := a.Numerator * int(b.Denominator) + b.Numerator * int(a.Denominator)
 	d := a.Denominator * b.Denominator
@@ -117,6 +137,35 @@ func add(a Fraction, b Fraction) Fraction {
 	nn, nd := simplify(abs(n), d)
 
 	return Fraction{int(nn) * s, nd}
+}
+
+func sub(a Fraction, b Fraction) Fraction {
+	n := a.Numerator * int(b.Denominator) - b.Numerator * int(a.Denominator)
+	d := a.Denominator * b.Denominator
+	s := sign(n)
+
+	nn, nd := simplify(abs(n), d)
+
+	return Fraction{int(nn) * s, nd}
+}
+
+func wholes(n int, d uint) int {
+	s := sign(n)
+	if n < 0 {
+		n = -n
+	}
+	c := 0
+	for {
+		if n < int(d) {
+			return s * c
+		}
+		n -= int(d)
+		c++
+	}
+}
+
+func whole(x Fraction) int {
+	return wholes(x.Numerator, x.Denominator)
 }
 
 func Lex(script string) []Unit {
@@ -227,8 +276,15 @@ func Lex(script string) []Unit {
 			tokens = append(tokens, Fraction{1, 0})
 
 		// number cruncher
-		case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-':
 			endToken()
+
+			sign := 1
+
+			if c == '-' {
+				sign = -1
+				i++
+			}
 
 			digits := 0
 			dec := 0
@@ -270,9 +326,9 @@ func Lex(script string) []Unit {
 
 			num, denom = simplify(num, denom)
 
-			tokens = append(tokens, Fraction{int(num), denom})
+			tokens = append(tokens, Fraction{int(num) * sign, denom})
 
-		case '+', '-', '*', '/', '<', '>', '=', '.', '~', '&', '|', '^':
+		case '+', '*', '/', '<', '>', '=', '.', '~', '&', '|', '^', '%':
 			if !isOperator {
 				endToken()
 				isOperator = true
@@ -415,13 +471,11 @@ func Parse(tokens []Unit, i int) (Expression, int) {
 		[]Operator{"."},
 		[]Operator{".>"},
 		[]Operator{"/<", "/>"},
-		[]Operator{"--"},
-		[]Operator{"++", "..", "//"},
 		[]Operator{"*", "/"},
-		[]Operator{"+", "-"},
+		[]Operator{"+", "~"},
 		[]Operator{"<<", ">>"},
 		[]Operator{"<=", ">=", "<", ">"},
-		[]Operator{"=", "~="},
+		[]Operator{"==", "=", "~="},
 		[]Operator{"&", "|", "^"},
 	} {
 		for i := 1; i < len(bracketed); i++ {
@@ -450,11 +504,11 @@ func Parse(tokens []Unit, i int) (Expression, int) {
 				}
 
 				i--
-
+				
 				a := bracketed[i]
 				b := bracketed[i + 1]
 
-				bracketed = append(bracketed[:i], bracketed[i + 1:])
+				bracketed = append(bracketed[:i], bracketed[i + 1:]...)
 
 				bracketed[i] = Operation{"", a, b}
 			}
@@ -468,27 +522,225 @@ func Parse(tokens []Unit, i int) (Expression, int) {
 	return Expression{bracketed[0]}, i
 }
 
+func valueOf(x Unit) Fraction {
+	switch v := x.(type) {
+	case Fraction:
+		return v
+	case String:
+		return Fraction{len(v), 1}
+	case List:
+		return Fraction{len(v), 1}
+	}
+	return Fraction{0, 0}
+}
+
 func Evaluate(u Unit, s Dict) Unit {
 	switch v := u.(type) {
 	case Expression:
 		return Evaluate(v.Result, s)
 	case Symbol:
-		return s[string(v)]
+		val, ok := s[string(v)]
+		if ok {
+			return val
+		}
+		return Null{}
 	case Operation:
 		switch v.Name {
 		case "":
 			return Evaluate(v.A, s).(Function)(Evaluate(v.B, s))
+		case "<<", ">>":
+			a := Evaluate(v.A, s).(String)
+			b := whole(Evaluate(v.B, s).(Fraction))
+
+			right := v.Name == ">>"
+
+			if b < 0 {
+				b = -b
+				right = !right
+			}
+
+			bd := b / 8
+			br := b % 8
+
+			res := make([]byte, len(a))
+
+			if right {
+				for i := bd; i < len(a); i++ {
+					res[i] = a[i - bd]
+				}
+			} else {
+				for i := len(a) - bd - 1; i >= 0; i-- {
+					res[i] = a[i + bd]
+				}
+			}
+
+			var c byte = 0
+
+			if right {
+				for i := 0; i < len(res); i++ {
+					d := res[i]
+					res[i] = (d >> br) | c
+					c = d << (8 - br)
+				}
+			} else {
+				for i := len(res) - 1; i >= 0; i-- {
+					d := res[i]
+					res[i] = (d << br) | c
+					c = d >> (8 - br)
+				}
+			}
+
+			return String(res)
+
+		case "&", "|", "^":
+			a := Evaluate(v.A, s).(String)
+			b := Evaluate(v.B, s).(String)
+			var res strings.Builder
+			for i := 0; i < len(a); i++ {
+				var bi byte = 0
+				if i < len(b) {
+					bi = b[i]
+				}
+				switch v.Name {
+				case "&":
+					res.WriteByte(a[i] & bi)
+				case "|":
+					res.WriteByte(a[i] | bi)
+				case "^":
+					res.WriteByte(a[i] ^ bi)
+				}
+			}
+			return String(res.String())
+		case "<", ">", "<=", ">=", "=":
+			comp := fsign(sub(valueOf(Evaluate(v.A, s)), valueOf(Evaluate(v.B, s))))
+
+			t := false
+
+			switch v.Name {
+			case "<":
+				t = comp < 0
+			case ">":
+				t = comp > 0
+			case "<=":
+				t = comp <= 0
+			case ">=":
+				t = comp >= 0
+			case "=":
+				t = comp == 0
+			}
+
+			if t {
+				return Fraction{1, 1}
+			} else {
+				return Fraction{0, 1}
+			}
+		case "==":
+			t := Evaluate(v.A, s) == Evaluate(v.B, s)
+			if t {
+				return Fraction{1, 1}
+			} else {
+				return Fraction{0, 1}
+			}
+		case "~=":
+			eq := reflect.TypeOf(Evaluate(v.A, s)) == reflect.TypeOf(Evaluate(v.B, s))
+			if eq {
+				return Fraction{1, 1}
+			}
+			return Fraction{0, 1}
 		case "*":
-			return mul(Evaluate(v.A, s).(Fraction), Evaluate(v.B, s).(Fraction))
+			b := Evaluate(v.B, s)
+			switch a := Evaluate(v.A, s).(type) {
+			case Fraction:
+				return mul(a, b.(Fraction))
+			case List:
+				l := List{}
+				for _, e := range a {
+					l = append(l, b.(Function)(e))
+				}
+				return l
+			case Dict:
+				l := List{}
+				kl := []string{}
+				for k, _ := range a {
+					kl = append(kl, k)
+				}
+				slices.Sort(kl)
+				for _, k := range kl {
+					l = append(l, b.(Function)(String(k)))
+				}
+				return l
+			}
+		case "~":
+			b := Evaluate(v.B, s)
+			switch a := Evaluate(v.A, s).(type) {
+			case Fraction:
+				return sub(a, b.(Fraction))
+			case String:
+				return sub(Fraction{len(a), 1}, b.(Fraction))
+			case List:
+				return sub(Fraction{len(a), 1}, b.(Fraction))
+			}
+			return Null{}
 		case "+":
-			return add(Evaluate(v.A, s).(Fraction), Evaluate(v.B, s).(Fraction))
-		case "-":
-			b := Evaluate(v.B, s).(Fraction)
-			return add(Evaluate(v.A, s).(Fraction), Fraction{-b.Numerator, b.Denominator})
+			b := Evaluate(v.B, s)
+			switch a := Evaluate(v.A, s).(type) {
+			case Fraction:
+				return add(Evaluate(v.A, s).(Fraction), Evaluate(v.B, s).(Fraction))
+			case String:
+				return a + b.(String)
+			case List:
+				return append(a, b.(List))
+			case Dict:
+				return merge(a, b.(Dict))
+			}
+			return Null{}
 		case "/":
-			b := Evaluate(v.B, s).(Fraction)
-			sn := sign(b.Numerator)
-			return mul(Evaluate(v.A, s).(Fraction), Fraction{sn * int(b.Denominator), uint(b.Numerator * sn)})
+			b := Evaluate(v.B, s)
+			switch a := Evaluate(v.A, s).(type) {
+			case Fraction:
+				return div(a, b.(Fraction))
+			case String:
+				bh := whole(b.(Fraction))
+				if bh < 0 {
+					return a[len(a) + bh:]
+				} else {
+					return a[:bh]
+				}
+			}
+		case ".":
+			ua := Evaluate(v.A, s)
+
+			var b Unit
+
+			switch bv := v.B.(type) {
+			case Symbol:
+				b = String(bv)
+			default:
+				b = Evaluate(bv, s)
+			}
+
+			var val Unit
+			var ok bool
+
+			switch a := ua.(type) {
+			case String:
+				ok = b.(Fraction).Denominator == 1 && b.(Fraction).Numerator >= 0 && b.(Fraction).Numerator < len(a)
+				if ok {
+					val = a[b.(Fraction).Numerator]
+				}
+			case List:
+				ok = b.(Fraction).Denominator == 1 && b.(Fraction).Numerator >= 0 && b.(Fraction).Numerator < len(a)
+				if ok {
+					val = a[b.(Fraction).Numerator]
+				}
+			case Dict:
+				val, ok = a[string(b.(String))]
+			}
+
+			if ok {
+				return val
+			}
+			return Null{}
 		}
 	case Protolist:
 		l := List{}
@@ -575,18 +827,10 @@ func Pretty(u Unit, tabs int) string {
 		}
 		return "\"" + r + "\""
 	case Fraction:
-		if v.Numerator >= 0 && v.Denominator == 1 {
-			return strconv.Itoa(v.Numerator)
+		if v.Denominator == 1 {
+			return fmt.Sprintf("%d", v.Numerator)
 		}
-		r := "("
-		if v.Numerator < 0 {
-			r += "0"
-		}
-		r += strconv.Itoa(v.Numerator)
-		if v.Denominator != 1 {
-			r += " / " + strconv.FormatUint(uint64(v.Denominator), 10)
-		}
-		return r + ")"
+		return fmt.Sprintf("(%d / %d)", v.Numerator, v.Denominator)
 	case Protolist:
 		return prettyList(v, tabs)
 	case List:
@@ -603,14 +847,14 @@ func Pretty(u Unit, tabs int) string {
 		r := "{\n"
 
 		for k, v := range v {
-			r += genTabs(tabs + 1) + k + ": " + Pretty(v, tabs + 1) + ",\n"
+			r += genTabs(tabs + 1) + Pretty(String(k), tabs + 1) + ": " + Pretty(v, tabs + 1) + ",\n"
 		}
 
 		return r + genTabs(tabs) + "}"
 	case Protofunction:
 		return "(\\" + string(v.Variable) + " " + Pretty(v.Result, tabs) + ")"
 	case Function:
-		return "(\\x # FUNCTION #)"
+		return "(\\x)"
 	}
 
 	return "<UNKNOWN>"

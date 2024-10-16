@@ -6,7 +6,8 @@ import (
 )
 
 func TestFull(t *testing.T) {
-	script := ""
+	script := `
+	`
 
 	tokens := Lex(script)
 	fmt.Println(Pretty(List(tokens), 0))
