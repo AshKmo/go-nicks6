@@ -779,7 +779,7 @@ func Evaluate(u Unit, s Dict) Unit {
 func Interpret(script string, scope Dict) Unit {
 	tokens := Lex(script)
 	parsed, _ := Parse(tokens, 0)
-	return Evaluate(parsed.Result, scope)
+	return Evaluate(parsed, scope)
 }
 
 func prettyList(l []Unit, tabs int) string {
